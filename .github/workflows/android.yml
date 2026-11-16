@@ -90,6 +90,8 @@ jobs:
           clone_tag https://github.com/libsdl-org/SDL.git "$deps/SDL3" release-3.4.18
           clone_sha https://github.com/bylaws/libadrenotools.git "$deps/adrenotools" 8fae8ce254dfc1344527e05301e43f37dea2df80
           git -C "$deps/adrenotools" apply "$GITHUB_WORKSPACE/tools/native/adrenotools-kgsl-context-priority.patch"
+          git -C "$deps/adrenotools" submodule update --init --depth 1 -- lib/linkernsbypass
+          test -f "$deps/adrenotools/lib/linkernsbypass/CMakeLists.txt"
           clone_sha https://github.com/xemu-project/nv2a_vsh_cpu.git "$deps/root/subprojects/nv2a_vsh_cpu" 561fe80da57a881f89000256b459440c0178a7ce
           clone_sha https://github.com/qemu/libslirp.git "$deps/libslirp" 26be815b86e8d49add8c9a8b320239b9594ff03d
           echo "NC_DEPS=$deps" >> "$GITHUB_ENV"
