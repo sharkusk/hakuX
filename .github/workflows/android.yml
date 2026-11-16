@@ -111,6 +111,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          # gradle.properties names the maintainer's JDK. Use the runner's.
+          sed -i "s|^org.gradle.java.home=.*|org.gradle.java.home=${JAVA_HOME}|" android/gradle.properties
           echo "sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
           cd android
           chmod +x ./gradlew
