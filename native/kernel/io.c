@@ -2383,11 +2383,11 @@ static uint32_t disk_ioctl(const NcFile *nf, uint32_t code, uint8_t *out, uint32
  * page (0x3E, the DVDX2 authentication page) and reboots to the dashboard
  * unless the drive reports the Xbox partition authenticated (Panzer Dragoon
  * Orta, XDK 4928): CDFValid, PartitionArea 1, Authentication.
- * READ DVD STRUCTURE (0xAD) gets the reply xemu's ATAPI drive gives: physical
- * information, copyright, manufacturing information, and the format list. Tony
- * Hawk's Underground (4156002d) reads it at startup and returns to the
- * dashboard when that reply is zeros with a good status. A format that drive
- * does not serve fails the command. Anything else reads zeros. */
+ * READ DVD STRUCTURE (0xAD) of the security sector (address FF02FDFF, layer
+ * FE) gets the sector the drive makes (xc.c nc_xc_security_sector). Other
+ * formats get the reply xemu's ATAPI drive gives: physical information,
+ * copyright, manufacturing information, and the format list. A format that
+ * drive does not serve fails the command. Anything else reads zeros. */
 #define IOCTL_SCSI_PASS_THROUGH_DIRECT 0x4D014u
 #define SCSI_STATUS_CHECK_CONDITION 0x02u
 
@@ -2492,7 +2492,15 @@ static void scsi_pass_through(NcKernel *k, uint32_t sptd, uint32_t len)
     }
     uint8_t *d = nc_vm_host(k->vm, buf);
     memset(d, 0, n);
-    if (cdb[0] == 0x5A && (cdb[2] & 0x3F) == 0x3E && n >= 13) {
+    const uint32_t addr = (uint32_t)cdb[2] << 24 | (uint32_t)cdb[3] << 16 |
+                          (uint32_t)cdb[4] << 8 | cdb[5];
+    if (cdb[0] == 0xAD && addr == 0xFF02FDFFu && cdb[6] == 0xFE &&
+        nc_xc_security_sector(k, d, n)) {
+        nc_log("hakuX-native-io",
+               "scsi ad: the disc's security sector (%u bytes), "
+               "the drive's own",
+               n);
+    } else if (cdb[0] == 0x5A && (cdb[2] & 0x3F) == 0x3E && n >= 13) {
         d[1] = (uint8_t)(n < 28 ? n - 2 : 26); /* mode data length: past itself */
         d[8] = 0x3E;                           /* the page, 0x12 bytes past its header */
         d[9] = 0x12;

@@ -567,6 +567,10 @@ void nc_dpc_return(NcKernel *k);
 void nc_io_register(NcKernel *k);
 /* xc.c: crypto exports. */
 void nc_xc_register(NcKernel *k);
+/* XePublicKeyData, 0x11C bytes. Security sectors are signed under it. */
+void nc_xc_public_key(uint8_t *p);
+/* The security sector READ DVD STRUCTURE returns. False if n is too short. */
+bool nc_xc_security_sector(NcKernel *k, uint8_t *d, uint32_t n);
 /* Where the hard disk's partitions live on the host (PartitionN under it). */
 void nc_io_set_hdd_root(const char *path);
 const char *nc_io_hdd_root(void);
