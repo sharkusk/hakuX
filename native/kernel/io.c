@@ -2423,7 +2423,10 @@ static int dvd_structure(const uint8_t *cdb, uint8_t *d, uint32_t n,
     memset(tmp, 0, sizeof(tmp));
     switch (format) {
     case 0x00: /* physical format information */
-        if (cdb[6] != 0 || sectors > 0xffffffffu) {
+        /* xemu zeros the CDB (it is also the reply buffer) before reading
+         * the layer, so a nonzero layer still gets this one-layer
+         * descriptor. Underground sends layer 0xFE. */
+        if (sectors > 0xffffffffu) {
             return -1;
         }
         tmp[4] = 1;              /* DVD-ROM, part version 1 */
