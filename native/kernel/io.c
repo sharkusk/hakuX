@@ -2382,9 +2382,98 @@ static uint32_t disk_ioctl(const NcFile *nf, uint32_t code, uint8_t *out, uint32
  * Cdb +0x1C). XAPI checks the disc with MODE SENSE(10) of the Xbox security
  * page (0x3E, the DVDX2 authentication page) and reboots to the dashboard
  * unless the drive reports the Xbox partition authenticated (Panzer Dragoon
- * Orta, XDK 4928): CDFValid, PartitionArea 1, Authentication. Other commands
- * read zeros. */
+ * Orta, XDK 4928): CDFValid, PartitionArea 1, Authentication.
+ * READ DVD STRUCTURE (0xAD) gets the reply xemu's ATAPI drive gives: physical
+ * information, copyright, manufacturing information, and the format list. Tony
+ * Hawk's Underground (4156002d) reads it at startup and returns to the
+ * dashboard when that reply is zeros with a good status. A format that drive
+ * does not serve fails the command. Anything else reads zeros. */
 #define IOCTL_SCSI_PASS_THROUGH_DIRECT 0x4D014u
+#define SCSI_STATUS_CHECK_CONDITION 0x02u
+
+static void put_be16(uint8_t *p, unsigned v)
+{
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+}
+
+static void put_be32(uint8_t *p, unsigned v)
+{
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+/* READ DVD STRUCTURE for one 2048-byte sector image of `sectors` sectors.
+ * CDB: media in byte 1, layer in byte 6, format in byte 7. Returns the reply
+ * length written at d, or -1 when the command is rejected. The bytes follow
+ * the DVD physical-format layout xemu serves from ide_dvd_read_structure. */
+static int dvd_structure(const uint8_t *cdb, uint8_t *d, uint32_t n,
+                         uint64_t sectors)
+{
+    const unsigned format = cdb[7];
+    uint8_t tmp[2052];
+    unsigned alloc, copy;
+    int ret;
+
+    if (sectors == 0 || cdb[1] != 0 || n == 0) {
+        return -1;
+    }
+    memset(tmp, 0, sizeof(tmp));
+    switch (format) {
+    case 0x00: /* physical format information */
+        if (cdb[6] != 0 || sectors > 0xffffffffu) {
+            return -1;
+        }
+        tmp[4] = 1;              /* DVD-ROM, part version 1 */
+        tmp[5] = 0x0f;           /* 120 mm, rate unspecified */
+        tmp[6] = 1;              /* one layer, read-only */
+        put_be32(tmp + 12, (unsigned)(sectors - 1)); /* end sector */
+        put_be32(tmp + 16, (unsigned)(sectors - 1)); /* layer 0 end sector */
+        put_be16(tmp, 2048 + 2); /* length, not counting itself */
+        ret = 2048 + 4;
+        break;
+    case 0x01: /* copyright information */
+        put_be16(tmp, 4 + 2);
+        ret = 4 + 4;
+        break;
+    case 0x04: /* manufacturing information */
+        put_be16(tmp, 2048 + 2);
+        ret = 2048 + 4;
+        break;
+    case 0xff: /* list of the formats above */
+        tmp[4] = 0x00;
+        tmp[5] = 0x40; /* readable */
+        put_be16(tmp + 6, 2048 + 4);
+        tmp[8] = 0x01;
+        tmp[9] = 0x40;
+        put_be16(tmp + 10, 4 + 4);
+        tmp[12] = 0x03; /* BCA, listed and then rejected, as that drive does */
+        tmp[13] = 0x40;
+        put_be16(tmp + 14, 188 + 4);
+        tmp[16] = 0x04;
+        tmp[17] = 0x40;
+        put_be16(tmp + 18, 2048 + 4);
+        put_be16(tmp, 16 + 2);
+        ret = 16 + 4;
+        break;
+    default:
+        return -1;
+    }
+    /* The CDB's allocation length is the transfer, and zero means none.
+     * The guest buffer is the other limit. */
+    alloc = ((unsigned)cdb[8] << 8) | cdb[9];
+    copy = (unsigned)ret;
+    if (copy > alloc) {
+        copy = alloc;
+    }
+    if (copy > n) {
+        copy = n;
+    }
+    memcpy(d, tmp, copy);
+    return (int)copy;
+}
 
 static void scsi_pass_through(NcKernel *k, uint32_t sptd, uint32_t len)
 {
@@ -2393,7 +2482,8 @@ static void scsi_pass_through(NcKernel *k, uint32_t sptd, uint32_t len)
     }
     const uint8_t *cdb = nc_vm_host(k->vm, sptd + 0x1C);
     const uint32_t n = nc_vm_rd32(k->vm, sptd + 0x0C), buf = nc_vm_rd32(k->vm, sptd + 0x14);
-    *(uint8_t *)nc_vm_host(k->vm, sptd + 2) = 0; /* SCSI status: good */
+    uint8_t *status = nc_vm_host(k->vm, sptd + 2);
+    *status = 0; /* SCSI status: good */
     if (!buf || !n) {
         return;
     }
@@ -2406,6 +2496,26 @@ static void scsi_pass_through(NcKernel *k, uint32_t sptd, uint32_t len)
         d[10] = 1;                             /* CDFValid */
         d[11] = 1;                             /* PartitionArea: the Xbox partition */
         d[12] = 1;                             /* Authentication */
+    } else if (cdb[0] == 0xAD) {
+        struct stat st;
+        uint64_t sectors = 0;
+        int replied;
+        const unsigned alloc = ((unsigned)cdb[8] << 8) | cdb[9];
+        if (k->disc && k->disc->fd >= 0 && fstat(k->disc->fd, &st) == 0 &&
+            st.st_size > 0) {
+            sectors = (uint64_t)st.st_size / 2048;
+        }
+        replied = dvd_structure(cdb, d, n, sectors);
+        if (replied < 0) {
+            *status = SCSI_STATUS_CHECK_CONDITION;
+            nc_log("hakuX-native-io",
+                   "scsi ad %02x layer %u media %u alloc %u: rejected (%u)",
+                   cdb[7], cdb[6], cdb[1], alloc, n);
+        } else {
+            nc_log("hakuX-native-io",
+                   "scsi ad %02x layer %u media %u alloc %u (%u of %u bytes)",
+                   cdb[7], cdb[6], cdb[1], alloc, (unsigned)replied, n);
+        }
     } else {
         nc_log("hakuX-native-io", "scsi %02x (%u bytes): zeros", cdb[0], n);
     }
